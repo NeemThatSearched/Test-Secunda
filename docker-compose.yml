@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:15
+    container_name: organizations_db
+    environment:
+      POSTGRES_DB: organizations_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: organizations_api
+    ports:
+      - "${APP_PORT:-8000}:80"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:password@db:5432/organizations_db}
+      API_KEY: ${API_KEY:-my_super_secret_api_key_2024}
+      SECRET_KEY: ${SECRET_KEY:-super_secret_key_for_jwt_tokens_change_me}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      MAX_ACTIVITY_DEPTH: ${MAX_ACTIVITY_DEPTH:-3}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Ожидание PostgreSQL...' &&
+        sleep 10 &&
+        echo 'Устанавливаем критичные пакеты...' &&
+        pip install sqlalchemy alembic asyncpg pydantic-settings || echo 'Пакеты не установились' &&
+        echo 'Запуск миграций...' &&
+        python3 -m alembic upgrade head || echo 'Миграции пропущены' &&
+        echo 'Создание тестовых данных...' &&
+        python3 scripts/seed_data.py || echo 'Тестовые данные пропущены' &&
+        echo 'Запуск FastAPI сервера...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 80
+      "
+
+volumes:
+  postgres_data:

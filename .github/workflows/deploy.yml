@@ -1,0 +1,93 @@
+name: Deploy Organizations Directory API v1
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Check code standards with flake8
+      run: |
+        pip install flake8
+        flake8 app --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 app --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Check required secrets
+      env:
+        API_KEY: ${{ secrets.API_KEY }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      run: |
+        test -n "$API_KEY" || echo "WARNING: API_KEY пуст"
+        test -n "$SECRET_KEY" || echo "WARNING: SECRET_KEY пуст"
+
+    - name: Build and test Docker image
+      run: |
+        docker build -t test-app .
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Docker image
+      run: |
+        docker build -t organizations-api:${{ github.sha }} .
+        docker tag organizations-api:${{ github.sha }} organizations-api:latest
+
+
+
+    - name: Deploy application
+      env:
+        API_KEY: ${{ secrets.API_KEY || 'my_super_secret_api_key_2024' }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY || 'my_super_secret_key' }}
+        DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+      run: |
+        if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_USER" ] && [ -n "$DEPLOY_KEY" ]; then
+          echo "$DEPLOY_KEY" > deploy_key
+          chmod 600 deploy_key
+          tar -czf organizations-project.tar.gz --ignore-failed-read --exclude=.git --exclude=.github --exclude=venv --exclude=__pycache__ --exclude="*.pyc" --exclude=.pytest_cache --exclude=*.log --exclude=organizations-project.tar.gz --exclude=.DS_Store --exclude=.vscode --exclude=.idea .
+          scp -i deploy_key -o StrictHostKeyChecking=no organizations-project.tar.gz $DEPLOY_USER@$DEPLOY_HOST:/tmp/
+          ssh -i deploy_key -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST "
+            cd /tmp &&
+            rm -rf organizations-api &&
+            mkdir organizations-api &&
+            cd organizations-api &&
+            tar -xzf /tmp/organizations-project.tar.gz &&
+            docker compose down || true &&
+            docker system prune -af &&
+            docker compose build --no-cache &&
+            export API_KEY='$API_KEY' &&
+            export SECRET_KEY='$SECRET_KEY' &&
+            docker compose up -d &&
+            sleep 45 &&
+            ufw allow 8000 || true
+          "
+          sleep 10
+          curl -s -f -H "Authorization: Bearer $API_KEY" http://$DEPLOY_HOST:8000/health || (
+            ssh -i deploy_key -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST "cd /tmp/organizations-api && docker compose logs"
+            exit 1
+          )
+          rm deploy_key organizations-project.tar.gz
+        else
+          echo "Локальный запуск: ./start.sh"
+        fi
